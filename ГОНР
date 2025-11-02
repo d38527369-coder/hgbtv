@@ -1,0 +1,144 @@
+mport os
+import json
+import threading
+import time
+from telegram import Update, InputMediaPhoto
+from telegram.ext import Updater, CommandHandler, CallbackContext, MessageHandler, Filters
+
+# ---- Майнери по замовчуванню ----
+miners = {
+    "Antminer D5": {"price": 200, "profit": 20, "image": "images/antminer_d5.png"},
+    "Antminer S19": {"price": 400, "profit": 35, "image": "images/antminer_s19.png"},
+    "GPU X1": {"price": 150, "profit": 15, "image": "images/gpu_x1.png"}
+}
+
+promocodes = {"WELCOME100": 100, "FREEGPU": 0, "POWERBOOST": 0}
+
+# ---- Дані користувачів ----
+users = {}
+
+# ---- Файли ----
+def save_users():
+    with open("users.json", "w") as f:
+        json.dump(users, f)
+
+def load_users():
+    global users
+    try:
+        with open("users.json", "r") as f:
+            users = json.load(f)
+    except:
+        users = {}
+
+# ---- Завантаження модів ----
+def load_mods():
+    mods_inventory = {}
+    if os.path.exists("mods"):
+        for filename in os.listdir("mods"):
+            if filename.endswith(".png") or filename.endswith(".json"):
+                mods_inventory[filename] = {"type": "custom", "profit": 10, "image": f"mods/{filename}"}
+    return mods_inventory
+
+# ---- Команди ----
+def start(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    if user_id not in users:
+        users[user_id] = {"balance": 500, "inventory": {name: 0 for name in miners}}
+        save_users()
+    update.message.reply_text(
+        "Привіт! Ласкаво просимо у твою майнер-ферму!\nВикористовуй /balance, /miners, /buy, /promo"
+    )
+
+def balance_cmd(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    inv = users[user_id]["inventory"]
+    total_profit = sum((miners.get(m, load_mods().get(m, {"profit": 0}))["profit"])*q for m, q in inv.items())
+    update.message.reply_text(f"Баланс: {users[user_id]['balance']}₴\nЩоденний прибуток: {total_profit}₴")
+
+def miners_cmd(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    inv = users[user_id]["inventory"]
+    media = []
+    text_lines = []
+    all_miners = {**miners, **load_mods()}
+    for name, quantity in inv.items():
+        if quantity > 0 and name in all_miners:
+            miner_data = all_miners[name]
+            text_lines.append(f"{name}: {quantity} шт., Приб/день: {miner_data['profit']*quantity}₴")
+            media.append(InputMediaPhoto(open(miner_data["image"], 'rb'), caption=text_lines[-1]))
+    if media:
+        update.message.reply_media_group(media)
+    else:
+        update.message.reply_text("У вас немає майнерів в інвентарі.")
+
+def buy_cmd(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    if len(context.args) == 0:
+        update.message.reply_text("Введи назву майнера після /buy, наприклад: /buy Antminer D5")
+        return
+    miner_name = " ".join(context.args)
+    all_miners = {**miners, **load_mods()}
+    if miner_name in all_miners:
+        price = all_miners[miner_name].get("price", 100)  # моди можна купувати за 100
+        if users[user_id]["balance"] >= price:
+            users[user_id]["balance"] -= price
+            if miner_name not in users[user_id]["inventory"]:
+                users[user_id]["inventory"][miner_name] = 0
+            users[user_id]["inventory"][miner_name] += 1
+            save_users()
+            update.message.reply_text(f"Ви купили {miner_name}!")
+        else:
+            update.message.reply_text("Недостатньо грошей!")
+    else:
+        update.message.reply_text("Такого майнера немає!")
+
+def promo_cmd(update: Update, context: CallbackContext):
+    user_id = str(update.effective_user.id)
+    if len(context.args) == 0:
+        update.message.reply_text("Введи промокод після /promo")
+        return
+    code = context.args[0]
+    if code in promocodes:
+        users[user_id]["balance"] += promocodes[code]
+        save_users()
+        update.message.reply_text(f"Промокод застосовано! Додано {promocodes[code]}₴")
+    else:
+        update.message.reply_text("Неправильний промокод!")
+
+# ---- Прийом модів через Telegram ----
+def add_mod(update, context):
+    if update.message.document:
+        file = context.bot.get_file(update.message.document.file_id)
+        if not os.path.exists("mods"):
+            os.mkdir("mods")
+        file.download(custom_path=f"mods/{update.message.document.file_name}")
+        update.message.reply_text(f"Мод {update.message.document.file_name} успішно доданий!")
+    else:
+        update.message.reply_text("Прикріпи файл модифікації для завантаження.")
+
+# ---- Автоприбуток ----
+def auto_profit():
+    while True:
+        all_miners = {**miners, **load_mods()}
+        for user_id, data in users.items():
+            profit = sum(all_miners[m]["profit"]*q for m, q in data["inventory"].items() if m in all_miners)
+            data["balance"] += profit
+        save_users()
+        time.sleep(10)
+
+# ---- Запуск бота ----
+load_users()
+TOKEN = "ТУТ_ТВОЙ_ТОКЕН_БОТА"
+updater = Updater(TOKEN)
+dp = updater.dispatcher
+
+dp.add_handler(CommandHandler("start", start))
+dp.add_handler(CommandHandler("balance", balance_cmd))
+dp.add_handler(CommandHandler("miners", miners_cmd))
+dp.add_handler(CommandHandler("buy", buy_cmd))
+dp.add_handler(CommandHandler("promo", promo_cmd))
+dp.add_handler(MessageHandler(Filters.document, add_mod))  # Прийом модів
+
+threading.Thread(target=auto_profit, daemon=True).start()
+updater.start_polling()
+updater.idle()
